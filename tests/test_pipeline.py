@@ -124,11 +124,11 @@ class GenerationTests(unittest.TestCase):
 
             with patch("sys.argv", args), patch.object(generator, "generate_split_dataset", side_effect=generate), contextlib.redirect_stdout(io.StringIO()):
                 generator.main()
-                data = yaml.safe_load((output / "data.yaml").read_text())
-                self.assertEqual(data["path"], str(output.resolve()))
+                data = yaml.safe_load((output / "data.yaml").read_text(encoding="utf-8"))
+                self.assertEqual(Path(data["path"]).resolve(), output.resolve())
                 self.assertEqual(len(data["names"]), 12)
                 self.assertNotIn("val", data)
-                self.assertTrue(json.loads((output / "manifest.json").read_text())["assets"]["train"]["pieces"])
+                self.assertTrue(json.loads((output / "manifest.json").read_text(encoding="utf-8"))["assets"]["train"]["pieces"])
                 with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     generator.main()
 
@@ -137,7 +137,7 @@ class QualityTests(unittest.TestCase):
     def test_nonfinite_labels_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             label = Path(directory) / "sample.txt"
-            label.write_text("0 0.5 0.5 nan 0.2\n0 0.5 0.5 0.2 inf\n")
+            label.write_text("0 0.5 0.5 nan 0.2\n0 0.5 0.5 0.2 inf\n", encoding="utf-8")
             boxes, errors, _ = validate_label_file(label)
             self.assertFalse(boxes)
             self.assertEqual(len(errors), 2)
@@ -149,7 +149,7 @@ class QualityTests(unittest.TestCase):
                 (root / "images" / split).mkdir(parents=True)
                 (root / "labels" / split).mkdir(parents=True)
                 Image.new("RGB", (80, 80), "red").save(root / "images" / split / "1.png")
-                (root / "labels" / split / "1.txt").write_text(f"{label} 0.5 0.5 0.2 0.2\n")
+                (root / "labels" / split / "1.txt").write_text(f"{label} 0.5 0.5 0.2 0.2\n", encoding="utf-8")
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(verify_dataset(directory, splits=("val", "test"), preview=False), 1)
 
@@ -174,26 +174,36 @@ class TrainingTests(unittest.TestCase):
         local = {p.stem for p in root.glob("*.py")}
         third_party = imports - sys.stdlib_module_names - local
         packages = {"PIL": "Pillow", "cv2": "opencv-python", "yaml": "PyYAML"}
-        declared = {re.split(r"[<>=!~\s]", line)[0].lower() for line in (root / "requirements.txt").read_text().splitlines() if line and not line.startswith("#")}
-        self.assertFalse({packages.get(module, module).lower() for module in third_party} - declared)
+        declared = {
+            re.split(r"[<>=!~\s]", line)[0].lower()
+            for line in (root / "requirements.txt").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        # PyTorch is installed separately using the appropriate CUDA or ROCm build.
+        platform_managed = {"torch", "torchvision"}
+        missing = {
+            packages.get(module, module).lower()
+            for module in third_party
+        } - declared - platform_managed
+        self.assertFalse(missing, f"Undeclared dependencies: {missing}")
 
     def test_tuned_values_override_baseline_and_cli_overrides_tuning(self):
         with tempfile.TemporaryDirectory() as directory:
             hyp = Path(directory) / "best_hyperparameters.yaml"
-            hyp.write_text("lr0: 0.002\ncls: 0.8\n")
+            hyp.write_text("lr0: 0.002\ncls: 0.8\n", encoding="utf-8")
             settings = training.load_settings(hyp, lr0=0.003, epochs=120, batch=None)
             self.assertEqual(settings["lr0"], 0.003)
             self.assertEqual(settings["cls"], 0.8)
             self.assertEqual(settings["epochs"], 120)
             self.assertEqual(settings["fliplr"], 0)
-            hyp.write_text("data: secret_test_set.yaml\n")
+            hyp.write_text("data: secret_test_set.yaml\n", encoding="utf-8")
             with self.assertRaises(ValueError):
                 training.load_settings(hyp)
 
     def test_training_and_tuning_dispatch_with_guarded_augmentations(self):
         with tempfile.TemporaryDirectory() as directory:
             data = Path(directory) / "data.yaml"
-            data.write_text("train: images/train\nval: images/val\n")
+            data.write_text("train: images/train\nval: images/val\n", encoding="utf-8")
             fake = MagicMock()
             with patch.dict("sys.modules", {"ultralytics": fake}), contextlib.redirect_stdout(io.StringIO()):
                 training.main(["--data", str(data), "--epochs", "1"])

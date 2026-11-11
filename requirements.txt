@@ -5,9 +5,10 @@ PyYAML>=6
 opencv-python
 matplotlib
 
-# Training (install the appropriate CUDA or AMD ROCm build for your GPU first)
-torch
-torchvision
+# Training: PyTorch (torch, torchvision) must be installed separately to match your hardware (CUDA or ROCm):
+#   NVIDIA CUDA:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#   AMD ROCm:     pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2
+#   CPU / others: pip install torch torchvision
 ultralytics>=8.4.0,<9
 
 # ONNX export and inference used by the notebook/evaluator
