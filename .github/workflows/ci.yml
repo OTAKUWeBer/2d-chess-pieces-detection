@@ -1,0 +1,39 @@
+name: Dataset checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install generation and test dependencies
+        run: python -m pip install "numpy>=1.26" "Pillow>=10" "PyYAML>=6"
+      - name: Run regression tests
+        run: python -m unittest discover -s tests -v
+      - name: Generate mixed scenes with multiprocessing
+        run: python generate_datasets.py --train-count 12 --val-count 4 --test-count 4 --workers 2 --out-dir tmp/ci-mixed
+      - name: Validate mixed scenes
+        run: python verify_dataset.py --data-dir tmp/ci-mixed --no-preview
+      - name: Generate embedded scenes with multiprocessing
+        run: python generate_datasets.py --composition embedded --train-count 12 --val-count 4 --test-count 4 --workers 2 --max-sample-attempts 32 --out-dir tmp/ci-embedded
+      - name: Validate embedded scenes
+        run: python verify_dataset.py --data-dir tmp/ci-embedded --no-preview

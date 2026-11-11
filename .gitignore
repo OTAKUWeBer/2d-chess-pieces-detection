@@ -1,11 +1,35 @@
-.venv
-__pycache__
+# Local environments, Python caches, and notebook checkpoints
+.venv/
+.venv-*/
+venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Local credentials and downloader headers
+.env
+.env.*
+!.env.example
+/assets/headers.txt
+
+# Generated datasets, training runs, and evaluation output
+/datasets/
+/tmp/
+/results/
+/models/
+/runs/
+/predictions/
+/eval_output/
+*.cache
+*.pt
+*.pth
+*.onnx
+*.engine
 *.zip
-datasets/*
-assets/headers.txt
-tmp/*
-results/*
-models/*
-test_images/*.jpg
-test_images/*.png
-predictions/*
+
+# Local real-image benchmark; keep the tracked fens.json references
+/test_images/*.jpg
+/test_images/*.jpeg
+/test_images/*.png
+/test_images/*.webp

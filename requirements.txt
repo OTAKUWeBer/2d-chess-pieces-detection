@@ -1,0 +1,22 @@
+# Generation, QA, and visualization
+numpy>=1.26
+Pillow>=10
+PyYAML>=6
+opencv-python
+matplotlib
+
+# Training (install the appropriate CUDA or AMD ROCm build for your GPU first)
+torch
+torchvision
+ultralytics>=8.4.0,<9
+
+# ONNX export and inference used by the notebook/evaluator
+onnx
+onnxslim
+onnxruntime
+
+# Asset downloading and SVG conversion
+aiofiles
+aiohttp
+xxhash
+CairoSVG

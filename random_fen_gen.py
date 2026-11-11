@@ -318,24 +318,38 @@ def generate_constrained_random_fen() -> str:
     return to_fen(board)
 
 
+def generate_recognition_fen() -> str:
+    """Show every class at varied squares so shape, rather than rank, identifies it."""
+    board = [None] * 64
+    available = list(range(8, 56))
+    random.shuffle(available)
+    put_piece("P", 1, board, available)
+    put_piece("p", 1, board, available)
+    available = [s for s in range(64) if board[s] is None]
+    random.shuffle(available)
+    for piece in "KQRBNkqrbn":
+        put_piece(piece, 1, board, available)
+    return to_fen(board)
+
+
 def generate_fen(strategy: str = "auto", allow_flip: bool = True) -> str:
     """
     Main entry point for position generation.
 
-    :param strategy: 'auto', 'opening', 'middlegame', 'endgame', 'tactical', or 'random'
+    :param strategy: 'auto', 'opening', 'middlegame', 'endgame', 'tactical', 'recognition', or 'random'
     :param allow_flip: If True, 50% chance to flip perspective (Black on bottom).
     :return: Standard FEN string (piece placement portion).
     """
     if strategy == "auto":
         r = random.random()
-        if r < 0.25:
+        if r < 0.20:
             fen = generate_opening_fen()
-        elif r < 0.60:
+        elif r < 0.50:
             fen = generate_middlegame_fen()
-        elif r < 0.80:
+        elif r < 0.70:
             fen = generate_endgame_fen()
         elif r < 0.90:
-            fen = generate_tactical_fen()
+            fen = generate_recognition_fen()
         else:
             fen = generate_constrained_random_fen()
     elif strategy == "opening":
@@ -348,6 +362,8 @@ def generate_fen(strategy: str = "auto", allow_flip: bool = True) -> str:
         fen = generate_tactical_fen()
     elif strategy == "random":
         fen = generate_constrained_random_fen()
+    elif strategy == "recognition":
+        fen = generate_recognition_fen()
     else:
         fen = generate_opening_fen()
 

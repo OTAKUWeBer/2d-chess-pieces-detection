@@ -1,0 +1,45 @@
+# Chess fine-tuning baseline, not a measured optimum. See README for sources.
+model: yolo26n.pt
+data: datasets/data.yaml
+# Keep the schedule reported to work best in the project's real screenshot runs.
+epochs: 100
+patience: 30
+imgsz: 800
+batch: 16
+workers: 4
+seed: 42
+deterministic: true
+optimizer: MuSGD
+# Public YOLO26n optimizer/loss values; augmentations adapted to screenshots.
+lr0: 0.0054
+lrf: 0.0495
+momentum: 0.947
+weight_decay: 0.00064
+box: 5.63
+cls: 0.56
+# YOLO26 uses this gain for L1 box-distance loss, despite the historical name.
+dfl: 9.04
+warmup_epochs: 3.0
+cos_lr: true
+# The generator already supplies board scales, UI, blur, and JPEG artifacts.
+mosaic: 0.0
+mixup: 0.0
+copy_paste: 0.0
+degrees: 0.0
+shear: 0.0
+perspective: 0.0
+fliplr: 0.0
+flipud: 0.0
+scale: 0.15
+translate: 0.05
+hsv_h: 0.01
+hsv_s: 0.15
+hsv_v: 0.15
+amp: true
+cache: false
+plots: true
+save: true
+save_period: 10
+project: runs/detect
+name: yolo26n_chess
+exist_ok: false

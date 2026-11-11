@@ -81,15 +81,11 @@ def get_default_font(size=11):
 
 
 def compute_image_hash(img_path):
-    """
-    Computes a collision-resistant thumbnail hash.
-    Resizes to 64x64 RGB (12,288 bytes) so the periodic 8x8 checkerboard grid
-    does not cause false-positive collisions.
-    """
+    """Hash decoded pixels and dimensions, independent of file metadata."""
     try:
         with Image.open(img_path) as img:
-            thumb = img.convert("RGB").resize((64, 64), Image.Resampling.BILINEAR)
-            return hashlib.sha256(thumb.tobytes()).hexdigest()
+            pixels = img.convert("RGB")
+            return hashlib.sha256(str(pixels.size).encode() + pixels.tobytes()).hexdigest()
     except Exception:
         return None
 
@@ -125,6 +121,10 @@ def validate_label_file(label_path, img_w=640, img_h=640, max_class=12):
 
         if cid < 0 or cid > max_class:
             errors.append(f"Line {idx}: Class ID {cid} out of range [0, {max_class}]")
+            continue
+        if not all(math.isfinite(v) for v in (xc, yc, w, h)):
+            errors.append(f"Line {idx}: Coordinates must be finite")
+            continue
 
         if not (0.0 < xc < 1.0 and 0.0 < yc < 1.0):
             errors.append(f"Line {idx}: Center ({xc:.4f}, {yc:.4f}) outside (0.0, 1.0)")
@@ -304,6 +304,7 @@ def verify_dataset(data_dir="datasets", splits=("train", "val", "test"), preview
             # Image sanity
             try:
                 with Image.open(img_path) as im:
+                    im.load()
                     iw, ih = im.size
             except Exception as e:
                 print(f"  [FAIL] Corrupted image file {img_path}: {e}")
@@ -399,21 +400,7 @@ def verify_dataset(data_dir="datasets", splits=("train", "val", "test"), preview
         if split_a not in split_hashes or split_b not in split_hashes:
             return 0
         common_hashes = set(split_hashes[split_a].keys()).intersection(set(split_hashes[split_b].keys()))
-        if not common_hashes:
-            return 0
-        true_dups = 0
-        for h in common_hashes:
-            p1 = split_hashes[split_a][h]
-            p2 = split_hashes[split_b][h]
-            l1 = p1.replace("images", "labels").rsplit(".", 1)[0] + ".txt"
-            l2 = p2.replace("images", "labels").rsplit(".", 1)[0] + ".txt"
-            if os.path.exists(l1) and os.path.exists(l2):
-                with open(l1) as f1, open(l2) as f2:
-                    if f1.read().strip() == f2.read().strip():
-                        true_dups += 1
-            else:
-                true_dups += 1
-        return true_dups
+        return len(common_hashes)
 
     if "train" in split_hashes and "val" in split_hashes:
         dups = check_true_leakage("train", "val")
@@ -430,6 +417,14 @@ def verify_dataset(data_dir="datasets", splits=("train", "val", "test"), preview
             all_passed = False
         else:
             print(f"  [PASS] 0 duplicate samples between Train and Test (No Leakage).")
+
+    if "val" in split_hashes and "test" in split_hashes:
+        dups = check_true_leakage("val", "test")
+        if dups:
+            print(f"  [FAIL] Data leakage: {dups} duplicate image(s) shared between Val and Test!")
+            all_passed = False
+        else:
+            print("  [PASS] 0 duplicate images between Val and Test (No Leakage).")
 
     print("\n================================================================================")
     if all_passed:

@@ -7,19 +7,19 @@ Key features:
    out translucent fringes and soft shadows) for all pieces.
 2. Realistic Visual Overlays: Move highlights, check indicators, legal move dots,
    analysis arrows, inner & outer board coordinates.
-3. Realistic Contexts & Environments:
+3. Screenshot Contexts & Environments:
    - Clean full-board views (85-100% frame) on a randomized light/dark/neutral-grey solid background
    - Web / App interfaces (Dark/Light themes, Eval bar, player cards, clocks)
    - Embedded / small boards on realistic background clutter (tests small-object detection / STAL)
-   - Physical screen captures (perspective keystone warp, subtle moire, vignette, lighting gradients)
-4. Mathematically Exact Transformations: Perspective warps and rotations transform every
-   bounding box corner via the exact projective homography matrix.
-5. Deterministic Zero-Leakage Splitting: Partitions piece sets, boards, and backgrounds
-   into disjoint Train, Validation, and Test subsets with a fixed seed.
+   - Multi-board broadcasts with every visible piece labeled
+4. Balanced recognition positions to reduce class and starting-square shortcuts.
+5. Deterministic samples, disjoint background files, and optional held-out styles.
 6. Multiprocessing & In-Memory Sprite Caching for high generation throughput.
 """
 
 import argparse
+import hashlib
+import json
 import math
 import multiprocessing
 import os
@@ -27,11 +27,13 @@ import random
 import shutil
 import warnings
 from io import BytesIO
+from pathlib import Path
 
 import numpy as np
+import yaml
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
-from random_fen_gen import generate_fen
+from random_fen_gen import flip_fen, generate_fen
 
 # Suppress PIL palette transparency conversion warning
 warnings.filterwarnings("ignore", category=UserWarning, module="PIL")
@@ -44,7 +46,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="PIL")
 # probability can fully occlude a piece while its label remains, which teaches
 # contradictory supervision (especially for king/queen and bishop/pawn).
 ADD_DISTORTIONS = True
-DISTORTION_PROBABILITY = 0.35
+DISTORTION_PROBABILITY = 0.15
 
 DISTORTION_LINES_RANGE = (3, 12)
 DISTORTION_LINE_WIDTH_RANGE = (1, 4)
@@ -123,12 +125,12 @@ DATASETS_IMAGES_DIR = "datasets/images"
 DATASETS_LABELS_DIR = "datasets/labels"
 
 # Default Generation Settings
-DEFAULT_IMAGE_SIZE = 640
-DEFAULT_BOARD_SIZE = 640
+DEFAULT_IMAGE_SIZE = 800
+DEFAULT_BOARD_SIZE = 800
 DEFAULT_ALPHA_THRESHOLD = 20  # Filters out translucent antialiasing fringe and soft shadows
 DEFAULT_SEED = 42
 DEFAULT_MIN_PIECE_PX = 18  # Reject/redraw samples with pieces smaller than this
-DEFAULT_MAX_SAMPLE_ATTEMPTS = 8  # Redraw attempts per sample before accepting the last one
+DEFAULT_MAX_SAMPLE_ATTEMPTS = 8  # Last attempt uses a large board, still enforcing the size floor
 
 # Font setup
 _CACHED_FONTS = {}
@@ -278,17 +280,16 @@ def load_piece_sprites(piece_set_name, tile_size):
     set_dir = os.path.join(PIECES_DIR, piece_set_name)
     for char, fname in FEN_TO_PIECE.items():
         path = os.path.join(set_dir, f"{fname}.png")
-        if not os.path.exists(path):
-            continue
         try:
-            im = Image.open(path).convert("RGBA")
+            with Image.open(path) as source:
+                im = source.convert("RGBA")
             im_resized = im.resize((tile_size, tile_size), Image.Resampling.LANCZOS)
             bbox = get_piece_tight_bbox(im_resized, DEFAULT_ALPHA_THRESHOLD)
             if bbox is None:
-                bbox = (0, 0, tile_size, tile_size)
+                raise ValueError("Piece has no visible pixels")
             sprites[char] = (im_resized, bbox)
         except Exception as e:
-            print(f"Warning: Failed loading piece {path}: {e}")
+            raise ValueError(f"Failed loading piece {path}: {e}") from e
 
     _PIECE_CACHE[cache_key] = sprites
     return sprites
@@ -369,8 +370,8 @@ def apply_custom_distortions(img):
 
     The goal is robustness to real-world screen/photo artifacts without
     destroying the object evidence: patches are small relative to the board,
-    glare is sparse and translucent, and the effect is applied to only a third
-    of samples. This keeps labels meaningful for small pieces.
+    glare is sparse and translucent, and most samples stay uncorrupted.
+    This keeps labels meaningful for small pieces.
     """
     if not ADD_DISTORTIONS or random.random() > DISTORTION_PROBABILITY:
         return img
@@ -1349,18 +1350,18 @@ def apply_photometric_effects(img):
     if random.random() < 0.35:
         img = ImageEnhance.Color(img).enhance(random.uniform(0.70, 1.30))
 
-    if random.random() < 0.25:
+    if random.random() < 0.15:
         w, h = img.size
-        scale = random.uniform(0.50, 0.85)
+        scale = random.uniform(0.75, 0.95)
         sw, sh = max(10, int(w * scale)), max(10, int(h * scale))
         img = img.resize((sw, sh), Image.Resampling.BILINEAR)
         img = img.resize((w, h), Image.Resampling.BICUBIC)
 
-    if random.random() < 0.20:
-        img = img.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.3, 0.9)))
+    if random.random() < 0.10:
+        img = img.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.2, 0.6)))
 
     if random.random() < 0.45:
-        quality = random.randint(40, 85)
+        quality = random.randint(70, 95)
         buffer = BytesIO()
         img.save(buffer, format="JPEG", quality=quality, optimize=True)
         buffer.seek(0)
@@ -1374,11 +1375,11 @@ def apply_photometric_effects(img):
 # Deterministic Zero-Leakage Dataset Partitioning
 # ==============================================================================
 
-def split_assets(seed=DEFAULT_SEED, train_ratio=0.70, val_ratio=0.15, test_ratio=0.15, holdout_assets=True):
-    """Deterministically partitions available boards, piece sets, and background noise."""
+def split_assets(seed=DEFAULT_SEED, train_ratio=0.70, val_ratio=0.15, test_ratio=0.15, holdout_assets=True, shared_styles=False):
+    """Partition backgrounds; optionally share rendering styles across independent scenes."""
     rng = random.Random(seed)
 
-    all_pieces = sorted(os.listdir(PIECES_DIR))
+    all_pieces = sorted(f for f in os.listdir(PIECES_DIR) if os.path.isdir(os.path.join(PIECES_DIR, f)))
     rng.shuffle(all_pieces)
     if holdout_assets:
         np_train = int(len(all_pieces) * train_ratio)
@@ -1391,7 +1392,7 @@ def split_assets(seed=DEFAULT_SEED, train_ratio=0.70, val_ratio=0.15, test_ratio
         val_pieces = []
         test_pieces = []
 
-    all_boards = sorted(os.listdir(BOARDS_DIR))
+    all_boards = sorted(f for f in os.listdir(BOARDS_DIR) if f.lower().endswith((".jpg", ".jpeg", ".png")))
     rng.shuffle(all_boards)
     if holdout_assets:
         nb_train = int(len(all_boards) * train_ratio)
@@ -1420,12 +1421,16 @@ def split_assets(seed=DEFAULT_SEED, train_ratio=0.70, val_ratio=0.15, test_ratio
         train_bgs = all_bgs[:ng_train]
         val_bgs = all_bgs[ng_train : ng_train + ng_val]
         test_bgs = all_bgs[ng_train + ng_val :]
-        if not test_bgs:
-            test_bgs = val_bgs.copy()
+        if not train_bgs or not val_bgs or not test_bgs:
+            raise ValueError("At least three backgrounds are required for disjoint train/val/test splits")
     else:
         train_bgs = all_bgs
         val_bgs = []
         test_bgs = []
+
+    if holdout_assets and shared_styles:
+        train_pieces = val_pieces = test_pieces = all_pieces
+        train_boards = val_boards = test_boards = all_boards
 
     return {
         "train": {"pieces": train_pieces, "boards": train_boards, "bgs": train_bgs},
@@ -1452,10 +1457,13 @@ def _generate_single_sample_once(
     pieces_pool,
     boards_pool,
     min_piece_px=DEFAULT_MIN_PIECE_PX,
+    composition=None,
 ):
     """Builds one sample and saves it."""
-    fen = generate_fen(strategy="auto", allow_flip=True)
     flipped = random.random() < 0.50
+    fen = generate_fen(strategy="auto", allow_flip=False)
+    if flipped:
+        fen = flip_fen(fen)
 
     tile_size = base_board_size // 8
     board_img = load_raw_board(board_file, base_board_size)
@@ -1465,7 +1473,7 @@ def _generate_single_sample_once(
     board_img = apply_board_overlays(board_img, fen, tile_size, flipped=flipped)
 
     comp_types = list(COMPOSITION_WEIGHTS)
-    comp_type = random.choices(comp_types, weights=[COMPOSITION_WEIGHTS[t] for t in comp_types])[0]
+    comp_type = composition or random.choices(comp_types, weights=[COMPOSITION_WEIGHTS[t] for t in comp_types])[0]
 
     if comp_type == "full":
         bg_color = get_random_solid_background(light_tile_color, dark_tile_color)
@@ -1527,12 +1535,15 @@ def _generate_single_sample_once(
             )
         else:
             sec_piece_set = random.choice(pieces_pool)
-            sec_fen = generate_fen(strategy="endgame", allow_flip=True)
+            sec_flipped = random.random() < 0.5
+            sec_fen = generate_fen(strategy="endgame", allow_flip=False)
+            if sec_flipped:
+                sec_fen = flip_fen(sec_fen)
             sec_sprites = load_piece_sprites(sec_piece_set, sec_tile_size)
             sec_board_img = apply_board_overlays(sec_board_raw, sec_fen, sec_tile_size)
             sec_coord_style = random.choices(["none", "inner", "outer"], weights=[0.3, 0.5, 0.2])[0]
             sec_board_img, sec_border_px = render_board_coordinates(
-                sec_board_img, sec_tile_size, flipped=random.random() < 0.5, style=sec_coord_style
+                sec_board_img, sec_tile_size, flipped=sec_flipped, style=sec_coord_style
             )
             sec_board_img, sec_piece_boxes = render_pieces_on_board(
                 sec_board_img, sec_sprites, sec_fen, sec_tile_size, border_offset=sec_border_px
@@ -1608,14 +1619,16 @@ def generate_single_sample(args):
         task_seed,
         min_piece_px,
         max_attempts,
+        composition,
     ) = args
 
     min_piece_px = max(0, int(min_piece_px))
     max_attempts = max(1, int(max_attempts))
 
     for attempt in range(max_attempts):
-        random.seed(f"{task_seed}:attempt:{attempt}")
-        accept_small = attempt == max_attempts - 1
+        attempt_seed = f"{task_seed}:attempt:{attempt}"
+        random.seed(attempt_seed)
+        np.random.seed(int.from_bytes(hashlib.sha256(attempt_seed.encode()).digest()[:4], "big"))
         saved = _generate_single_sample_once(
             img_id,
             split_name,
@@ -1629,12 +1642,16 @@ def generate_single_sample(args):
             labels_dir,
             pieces_pool,
             boards_pool,
-            min_piece_px=0 if accept_small else min_piece_px,
+            min_piece_px=min_piece_px,
+            composition=composition or ("full" if attempt == max_attempts - 1 else None),
         )
         if saved:
             return True
 
-    return False
+    raise RuntimeError(
+        f"Could not generate {split_name}/{img_id} with pieces >= {min_piece_px}px "
+        f"after {max_attempts} attempts. Increase --imgsz or reduce --min-piece-px."
+    )
 
 
 # ==============================================================================
@@ -1655,6 +1672,7 @@ def generate_split_dataset(
     seed=DEFAULT_SEED,
     min_piece_px=DEFAULT_MIN_PIECE_PX,
     max_attempts=DEFAULT_MAX_SAMPLE_ATTEMPTS,
+    composition=None,
 ):
     """Generates `count` samples for a given split using its assigned asset partition."""
     os.makedirs(images_dir, exist_ok=True)
@@ -1672,7 +1690,10 @@ def generate_split_dataset(
     tasks = []
     for idx in range(count):
         sample_id = start_id + idx
-        piece_set = task_rng.choice(pieces_list)
+        # Cover every style before repeating, even in a small training run.
+        if idx % len(pieces_list) == 0:
+            style_cycle = task_rng.sample(pieces_list, len(pieces_list))
+        piece_set = style_cycle[idx % len(pieces_list)]
         board_file = task_rng.choice(boards_list)
         bg_file = task_rng.choice(bgs_list)
         task_seed = f"{seed}:{split_name}:{sample_id}"
@@ -1693,6 +1714,7 @@ def generate_split_dataset(
             task_seed,
             min_piece_px,
             max_attempts,
+            composition,
         ))
 
     workers = num_workers or max(1, multiprocessing.cpu_count())
@@ -1714,12 +1736,14 @@ def main():
     parser.add_argument("--train-count", type=int, default=1000, help="Number of training samples to generate")
     parser.add_argument("--val-count", type=int, default=200, help="Number of validation samples to generate")
     parser.add_argument("--test-count", type=int, default=200, help="Number of test samples to generate")
-    parser.add_argument("--imgsz", type=int, default=DEFAULT_IMAGE_SIZE, help="Output image resolution (default 640)")
-    parser.add_argument("--board-size", type=int, default=DEFAULT_BOARD_SIZE, help="Base board resolution (default 640)")
+    parser.add_argument("--imgsz", type=int, default=DEFAULT_IMAGE_SIZE, help="Output image resolution (default 800)")
+    parser.add_argument("--board-size", type=int, default=DEFAULT_BOARD_SIZE, help="Base board resolution, divisible by 8 (default 800)")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Random seed for reproducible asset split and sample content")
     parser.add_argument("--workers", type=int, default=None, help="Number of multiprocessing workers")
     parser.add_argument("--out-dir", type=str, default="datasets", help="Root dataset output directory")
     parser.add_argument("--clean", action="store_true", help="Remove existing output directory before generation")
+    parser.add_argument("--holdout-styles", action="store_true", help="Reserve unseen piece/board styles for val/test instead of sharing styles")
+    parser.add_argument("--composition", choices=["mixed", *COMPOSITION_WEIGHTS], default="mixed", help="Scene mix, or a single scene type (use embedded for small boards on backgrounds)")
     parser.add_argument(
         "--min-piece-px",
         type=int,
@@ -1737,6 +1761,12 @@ def main():
     )
     args = parser.parse_args()
 
+    if min(args.train_count, args.val_count, args.test_count) < 0 or not any((args.train_count, args.val_count, args.test_count)):
+        parser.error("Sample counts must be nonnegative and at least one must be positive")
+    if args.imgsz < 256 or args.board_size < 256 or args.board_size % 8:
+        parser.error("--imgsz and --board-size must be >= 256; --board-size must be divisible by 8")
+    if args.workers is not None and args.workers < 1:
+        parser.error("--workers must be >= 1")
     if args.min_piece_px < 0:
         parser.error("--min-piece-px must be >= 0")
     if args.max_sample_attempts < 1:
@@ -1751,17 +1781,25 @@ def main():
     print(f"Target counts: Train={args.train_count}, Val={args.val_count}, Test={args.test_count}")
     print(f"Output Resolution: {args.imgsz}x{args.imgsz} | Random Seed: {args.seed}")
     print(f"Output Directory: {args.out_dir}")
-    print(f"Composition Mix: {COMPOSITION_WEIGHTS}")
+    print(f"Composition: {args.composition} | Mixed-mode weights: {COMPOSITION_WEIGHTS}")
     print(f"Minimum Piece Size Before Redraw: {args.min_piece_px}px")
     print(f"Custom Distortions Enabled: {ADD_DISTORTIONS} (Probability: {DISTORTION_PROBABILITY})")
 
+    out_path = os.path.realpath(args.out_dir)
+    repo_path = os.path.dirname(os.path.realpath(__file__))
+    output = Path(out_path)
+    if Path(repo_path).is_relative_to(output) or any(output.is_relative_to(Path(repo_path) / name) for name in ("assets", ".git", ".agents", ".codex", "test_images")):
+        parser.error("--out-dir must not contain the repository or be inside assets/")
+    if os.path.isdir(args.out_dir) and os.listdir(args.out_dir) and not args.clean:
+        parser.error("Output directory is not empty; choose a new --out-dir or use --clean")
+
+    holdout_assets = args.val_count > 0 or args.test_count > 0
+    partitions = split_assets(seed=args.seed, holdout_assets=holdout_assets, shared_styles=not args.holdout_styles)
     if args.clean and os.path.exists(args.out_dir):
         print(f"Cleaning existing directory: {args.out_dir}")
         shutil.rmtree(args.out_dir)
 
-    holdout_assets = args.val_count > 0 or args.test_count > 0
-    partitions = split_assets(seed=args.seed, holdout_assets=holdout_assets)
-    print("\nDeterministic Asset Partitioning (Zero Data Leakage):")
+    print(f"\nDeterministic Asset Partitioning (holdout styles: {args.holdout_styles}):")
     for sname in ["train", "val", "test"]:
         part = partitions[sname]
         print(f"  [{sname}] Piece sets: {len(part['pieces'])}, Boards: {len(part['boards'])}, Backgrounds: {len(part['bgs'])}")
@@ -1783,6 +1821,7 @@ def main():
             seed=args.seed,
             min_piece_px=args.min_piece_px,
             max_attempts=args.max_sample_attempts,
+            composition=None if args.composition == "mixed" else args.composition,
         )
 
     if args.val_count > 0:
@@ -1800,6 +1839,7 @@ def main():
             seed=args.seed,
             min_piece_px=args.min_piece_px,
             max_attempts=args.max_sample_attempts,
+            composition=None if args.composition == "mixed" else args.composition,
         )
 
     if args.test_count > 0:
@@ -1817,9 +1857,20 @@ def main():
             seed=args.seed,
             min_piece_px=args.min_piece_px,
             max_attempts=args.max_sample_attempts,
+            composition=None if args.composition == "mixed" else args.composition,
         )
 
+    data_config = {"path": out_path, "names": CLASS_NAMES if make_board_label else CLASS_NAMES[:12]}
+    for split, count in (("train", args.train_count), ("val", args.val_count), ("test", args.test_count)):
+        if count:
+            data_config[split] = f"images/{split}"
+    with open(os.path.join(args.out_dir, "data.yaml"), "w", encoding="utf-8") as f:
+        yaml.safe_dump(data_config, f, sort_keys=False)
+    with open(os.path.join(args.out_dir, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump({"settings": vars(args), "assets": partitions}, f, indent=2)
+
     print("\nDataset generation completed successfully!")
+    print(f"Training config: {os.path.join(out_path, 'data.yaml')}")
     print(f"Dataset root: {os.path.abspath(args.out_dir)}")
 
 

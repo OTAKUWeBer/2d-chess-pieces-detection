@@ -1,2 +1,3 @@
-generate training set with backgrounds that have a small chess board on them
-
+- [ ] Retrain the current generator's dataset with 100 epochs / patience 30 and compare against the earlier checkpoint on the same real screenshot collection. Restore the screenshot files and checkpoint first; they are not included in this checkout.
+- [ ] Recheck king/queen, bishop/pawn, and knight/rook confusion on real validation screenshots. Keep these issues open until measured results confirm an improvement.
+- [ ] Validate small-board detection on real background screenshots after training. Dedicated labeled generation is implemented with --composition embedded and documented in README.md.
